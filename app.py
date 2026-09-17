@@ -1,6 +1,7 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
+import re
 
 def process_pdf(uploaded_file):
     all_data = []
@@ -10,15 +11,17 @@ def process_pdf(uploaded_file):
         for page in pdf.pages:
             table = page.extract_table()
             if table:
+                # 移除全為空的列
                 table = [row for row in table if not all(cell is None for cell in row)]
                 if not table:
                     continue
 
                 if headers is None:
-                    headers = [str(cell).replace('\n', '') if cell else '' for cell in table[0]]
+                    # 第一頁，設定表頭並強制清除所有空白與換行，確保欄位名稱正確
+                    headers = [re.sub(r'\s+', '', str(cell)) if cell else '' for cell in table[0]]
                     all_data.extend(table[1:])
                 else:
-                    first_row = [str(cell).replace('\n', '') if cell else '' for cell in table[0]]
+                    first_row = [re.sub(r'\s+', '', str(cell)) if cell else '' for cell in table[0]]
                     if first_row == headers:
                         all_data.extend(table[1:])
                     else:
@@ -28,14 +31,23 @@ def process_pdf(uploaded_file):
         return None, "無法從 PDF 中解析出有效的表格格式。"
 
     df = pd.DataFrame(all_data, columns=headers)
-    df = df.replace(r'\n', '', regex=True)
     df = df.fillna('')
     
     return df, None
 
 def categorize_and_calculate(row):
-    org_string = str(row.get('主辦單位', '')).replace(' ', '')
-    course_string = str(row.get('課程名稱', '')).replace(' ', '')
+    # 取出文字，以防錯位，將主辦單位與課程名稱一起進行評估
+    org_val = str(row.get('主辦單位', ''))
+    course_val = str(row.get('課程名稱', ''))
+    reviewer_val = str(row.get('審查單位', ''))
+    
+    # 使用正規表達式去除所有(全形/半形)空白與換行符號
+    org_string = re.sub(r'\s+', '', org_val)
+    course_string = re.sub(r'\s+', '', course_val)
+    reviewer_string = re.sub(r'\s+', '', reviewer_val)
+    
+    # 組合字串，徹底解決 PDF 欄位內容左右溢出的錯位問題
+    combined_string = org_string + course_string + reviewer_string
     
     try:
         score = float(row.get('有效積分', 0))
@@ -43,8 +55,11 @@ def categorize_and_calculate(row):
         score = 0.0
 
     # ==== A類判斷邏輯 ====
-    a_keywords = ["中華民國贗復牙科學會", "中華民國復牙科學會", "中華民國贗復牙會", "復牙科"]
-    if any(kw in org_string for kw in a_keywords):
+    # 加入了異體字「贋」以防萬一
+    a_keywords = ["中華民國贗復牙科學會", "中華民國贋復牙科學會", "中華民國復牙科學會", "中華民國贗復牙會", "復牙科"]
+    
+    # 只要合併字串中有出現 A 類關鍵字，就判定為 A 類
+    if any(kw in combined_string for kw in a_keywords):
         return pd.Series(['A類', score])
 
     # ==== B類判斷邏輯 ====
@@ -59,11 +74,11 @@ def categorize_and_calculate(row):
         "台灣特殊需求者口腔醫學會", "牙體復形科", "中華民國牙體復形學會"
     ]
     
-    is_b_class = any(kw in org_string for kw in b_keywords)
+    is_b_class = any(kw in combined_string for kw in b_keywords)
     score_multiplier = 1.0
 
     # 規則 4：中華牙醫學會年會
-    if "中華牙醫學會年會" in org_string or "中華牙醫學會年會" in course_string:
+    if "中華牙醫學會年會" in combined_string:
         is_b_class = True
         score_multiplier = 1.0 / 3.0
 
@@ -87,10 +102,13 @@ def main():
             if error:
                 st.error(error)
             else:
+                # 確保必要欄位存在 (因為表頭也被清除了空白，所以一定是乾淨的字串)
                 if '主辦單位' not in df.columns or '有效積分' not in df.columns:
                     st.error("解析失敗：找不到「主辦單位」或「有效積分」欄位。")
+                    st.write("目前抓取到的欄位為：", df.columns.tolist())
                     return
 
+                # 執行分類運算
                 df[['分類', '核算後積分']] = df.apply(categorize_and_calculate, axis=1)
 
                 df_a = df[df['分類'] == 'A類']
