@@ -28,6 +28,13 @@ if uploaded_file is None:
     st.stop()
 
 
+def purify_text(text):
+    """徹底清除 PDF 隱形控制碼與空白，只保留中英數字以供精準比對"""
+    if not isinstance(text, str):
+        return ""
+    return re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', text)
+
+
 def extract_records_from_pdf(file_bytes) -> list[dict]:
     records = []
     full_text = ""
@@ -145,18 +152,19 @@ def finalize_record(record: dict) -> dict:
            not any(host.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]):
             host, course_name = course_name, host
 
-    # 徹底清除所有空白與不可見換行，避免 PDF 排版干擾比對
-    host_clean = re.sub(r'\s+', '', host)
-    review_clean = re.sub(r'\s+', '', review)
-    course_clean = re.sub(r'\s+', '', course_name)
+    # 徹底清除所有 PDF 隱形控制字元與空白
+    host_clean = purify_text(host)
+    review_clean = purify_text(review)
+    course_clean = purify_text(course_name)
     
     course_category = "待判定學分" 
     final_pts = original_pts
 
-    # 【A 類無敵字根】：加入容錯特徵，專門捕捉 贗/贋/膺 異體字與 PDF 漏字狀況
-    host_review = f"{host_clean}_{review_clean}"
+    # 【A 類無敵字根】：專門捕捉 贗/贋/膺 異體字與 PDF 漏字狀況
+    # 合併查驗，確保無論落在哪個欄位都能抓到
+    combined_text = f"{host_clean}_{review_clean}_{course_clean}"
     a_keywords = ["贗復", "贋復", "膺復", "復牙科"]
-    is_a_class = any(kw in host_review for kw in a_keywords)
+    is_a_class = any(kw in combined_text for kw in a_keywords)
 
     if is_a_class:
         course_category = "A"
@@ -166,8 +174,8 @@ def finalize_record(record: dict) -> dict:
         # 【B 類規則】：正面表述驗證
         is_b_class = False
         
-        # 規則 4（中華牙醫學會年會）- 需查驗課程名稱與主辦單位
-        if "中華牙醫學會年會" in course_clean or "中華牙醫學會年會" in host_review:
+        # 規則 4（中華牙醫學會年會）
+        if "中華牙醫學會年會" in combined_text:
             is_b_class = True
             final_pts = original_pts / 3.0
             
@@ -182,6 +190,7 @@ def finalize_record(record: dict) -> dict:
             ]
             
             # B 類比對：只查主辦單位與審查單位，避免將課程標題中的醫院誤判
+            host_review = f"{host_clean}_{review_clean}"
             if any(kw in host_review for kw in b_keywords):
                 is_b_class = True
                 
