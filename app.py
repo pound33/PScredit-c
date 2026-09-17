@@ -87,7 +87,7 @@ def extract_records_from_pdf(file_bytes) -> list[dict]:
             try: pts = float(pts_str.strip())
             except: pts = 0.0
             
-            # 分離主辦單位與課程名稱 (新格式常發生換行截斷或合併)
+            # 分離主辦單位與課程名稱 (解決新格式常發生換行截斷或合併)
             host_course = host_course.strip()
             if "|" in host_course:
                 parts = host_course.split("|", 1)
@@ -96,11 +96,22 @@ def extract_records_from_pdf(file_bytes) -> list[dict]:
             else:
                 lines = [line.strip() for line in host_course.split("\n") if line.strip()]
                 if len(lines) > 1:
-                    host = "".join(lines[:-1]).strip()
-                    course = lines[-1].strip()
+                    # 處理「學會」被斷行切開的極端狀況
+                    if lines[1] == "會" or lines[1] == "科學會":
+                        host = lines[0] + lines[1]
+                        course = " ".join(lines[2:])
+                    else:
+                        host = "".join(lines[:-1]).strip()
+                        course = lines[-1].strip()
                 else:
-                    host = host_course.replace("\n", "").strip()
-                    course = ""
+                    # 若被讀成單行字串，嘗試以常見後綴為界線切割
+                    match = re.search(r'(.*?學會|.*?醫院|.*?公會|.*?聯盟)\s+(.*)', host_course)
+                    if match:
+                        host = match.group(1).strip()
+                        course = match.group(2).strip()
+                    else:
+                        host = host_course.replace("\n", "").strip()
+                        course = ""
                     
             records.append({
                 "有效積分": pts,
@@ -130,32 +141,30 @@ def finalize_record(record: dict) -> dict:
     course_name = record.get("課程名稱", "")
     original_pts = record.get("有效積分", 0.0)
 
-    # 【智慧校正】：若 PDF 擷取時將「主辦單位」與「課程名稱」顛倒，自動換回來
+    # 智慧校正：若 PDF 擷取時將「主辦單位」與「課程名稱」顛倒，自動對調還原
     if any(course_name.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]) and \
        not any(host.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]):
         host, course_name = course_name, host
 
-    host_clean = host.replace(" ", "").replace("\n", "")
-    review_clean = review.replace(" ", "").replace("\n", "")
-    course_clean = course_name.replace(" ", "").replace("\n", "")
+    # 徹底清除所有空白與不可見字元，避免 PDF 排版干擾
+    host_clean = re.sub(r'\s+', '', host)
+    review_clean = re.sub(r'\s+', '', review)
+    course_clean = re.sub(r'\s+', '', course_name)
     
-    # 將欄位合併，徹底消除 PDF 欄位錯位或換行的影響
+    # 將欄位合併，徹底消除 PDF 欄位錯位或斷行的影響
     combined_text = f"{host_clean}_{review_clean}_{course_clean}"
     
     course_category = "待判定學分" 
     final_pts = original_pts
 
-    # 【A 類規則】：加入容錯特徵，專門捕捉被 PDF 吃掉「贗/贋」字的狀況
-    a_keywords = [
-        "中華民國贗復", "中華民國贋復", "贋復牙科", "贗復牙科",
-        "中華民國復牙", "復牙科學會"
-    ]
+    # 【A 類規則】：加入容錯字根，專門捕捉 贗/贋/膺 異體字與 PDF 漏字狀況
+    a_keywords = ["贗復", "贋復", "膺復", "復牙科"]
     is_a_class = any(kw in combined_text for kw in a_keywords)
 
     if is_a_class:
         course_category = "A"
-        # 為了讓 Excel 報表排版整齊，強制將 A 類的主辦單位正名補回缺字
-        host = "中華民國贗復牙科學會"
+        # 不管原文是贗復、贋復、還是漏字，一律強制正名為統一格式歸戶
+        host = "中華民國贋復牙科學會"
     else:
         # 【B 類規則】：正面表述驗證
         is_b_class = False
@@ -168,28 +177,21 @@ def finalize_record(record: dict) -> dict:
         # 若未命中規則 4，則檢驗其他主辦單位關鍵字
         if not is_b_class:
             b_keywords = [
-                # 規則 1
-                "醫學院", "醫學大學",
-                # 規則 2
-                "校友會", "校友總會", "牙友學會",
-                # 規則 3
-                "長庚醫院", "台大醫院", "總醫院", "奇美醫院", "成大醫院", 
-                "童綜合醫院", "中國附醫", "北醫附醫", "馬偕醫院", "高雄長庚", 
-                "高醫附醫", "花蓮慈濟",
-                # 規則 5
-                "中華民國口腔顎面外科學會", "中華民國齒顎矯正學會",
-                "中華民國家庭牙醫學會", "中華民國兒童牙醫學會",
-                "台灣牙周病醫學會", "中華民國牙髓病學會",
-                "台灣特殊需求者口腔醫學會牙體復形科", "中華民國牙體復形學會"
+                "醫學院", "醫學大學", "校友會", "校友總會", "牙友學會",
+                "長庚", "台大", "總醫院", "奇美", "成大", 
+                "童綜合", "中國附醫", "北醫", "馬偕", "高醫", "慈濟",
+                "口腔顎面外科", "齒顎矯正", "家庭牙醫", "兒童牙醫",
+                "牙周病", "牙髓病", "特殊需求", "牙體復形"
             ]
             
-            # 針對 B 類，我們已校正錯位，直接查主辦單位與審查單位即可避免誤判課程名稱
+            # B 類比對：只查主辦單位與審查單位，避免將課程名稱中的醫院名稱誤判
             if any(kw in host_clean or kw in review_clean for kw in b_keywords):
                 is_b_class = True
                 
         if is_b_class:
             course_category = "B"
 
+    # 清洗課程名稱，保留單一空白以利閱讀
     full_title = re.sub(r"\s+", " ", course_name.strip())
 
     return {
