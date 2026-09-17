@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("鳥專科醫師繼續教育積分自動整理器 (學分整理結果版)")
+st.title("鳥專科醫師繼續教育積分自動整理器 (學分整理專用版)")
 st.caption("專門支援「學分整理結果」格式：過濾專業課程、辨識 A/B 類學分，並匯出雙頁籤 Excel 報表。")
 
 # 1. 畫面首要條件：要求使用者先上傳檔案
@@ -125,35 +125,43 @@ def finalize_record(record: dict) -> dict:
     course_date = dates[0] if dates else "未知"
     year = course_date.split("/")[0] if dates else "未知"
 
-    host = record["主辦單位"]
-    review = record["審查單位"]
-    course_name = record["課程名稱"]
-    original_pts = record["有效積分"]
+    host = record.get("主辦單位", "")
+    review = record.get("審查單位", "")
+    course_name = record.get("課程名稱", "")
+    original_pts = record.get("有效積分", 0.0)
+
+    # 【智慧校正】：若 PDF 擷取時將「主辦單位」與「課程名稱」顛倒，自動換回來
+    if any(course_name.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]) and \
+       not any(host.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]):
+        host, course_name = course_name, host
+
+    host_clean = host.replace(" ", "").replace("\n", "")
+    review_clean = review.replace(" ", "").replace("\n", "")
+    course_clean = course_name.replace(" ", "").replace("\n", "")
     
-    # 移除空白，避免因 PDF 擷取造成的字元間距與漏字結合問題
-    host_clean = host.replace(" ", "")
-    review_clean = review.replace(" ", "")
-    course_clean = course_name.replace(" ", "")
+    # 將欄位合併，徹底消除 PDF 欄位錯位或換行的影響
+    combined_text = f"{host_clean}_{review_clean}_{course_clean}"
     
     course_category = "待判定學分" 
     final_pts = original_pts
 
-    # 【A 類規則】：因應 PDF 擷取時常常將「贗/贋」字轉成空白而被刪除（變成中華民國復牙科學會）
-    # 故放寬條件，將遺失字元後的特徵字串也一併納入白名單
+    # 【A 類規則】：加入容錯特徵，專門捕捉被 PDF 吃掉「贗/贋」字的狀況
     a_keywords = [
         "中華民國贗復", "中華民國贋復", "贋復牙科", "贗復牙科",
         "中華民國復牙", "復牙科學會"
     ]
-    is_a_class = any(kw in host_clean or kw in review_clean for kw in a_keywords)
+    is_a_class = any(kw in combined_text for kw in a_keywords)
 
     if is_a_class:
         course_category = "A"
+        # 為了讓 Excel 報表排版整齊，強制將 A 類的主辦單位正名補回缺字
+        host = "中華民國贗復牙科學會"
     else:
         # 【B 類規則】：正面表述驗證
         is_b_class = False
         
-        # 規則 4（中華牙醫學會年會）- 課程名稱或主辦單位命中
-        if "中華牙醫學會年會" in course_clean or "中華牙醫學會年會" in host_clean:
+        # 規則 4（中華牙醫學會年會）
+        if "中華牙醫學會年會" in combined_text:
             is_b_class = True
             final_pts = original_pts / 3.0
             
@@ -175,18 +183,17 @@ def finalize_record(record: dict) -> dict:
                 "台灣特殊需求者口腔醫學會牙體復形科", "中華民國牙體復形學會"
             ]
             
-            if any(kw in host_clean for kw in b_keywords):
+            # 針對 B 類，我們已校正錯位，直接查主辦單位與審查單位即可避免誤判課程名稱
+            if any(kw in host_clean or kw in review_clean for kw in b_keywords):
                 is_b_class = True
                 
-        # 確立為 B 類
         if is_b_class:
             course_category = "B"
 
-    # 清洗多餘代碼並重建課程名稱
     full_title = re.sub(r"\s+", " ", course_name.strip())
 
     return {
-        "主辦單位": host,
+        "主辦單位": host.strip(),
         "課程名稱": full_title,
         "類別": course_category,
         "有效積分": final_pts,
