@@ -90,8 +90,8 @@ def categorize_and_calculate(row):
 
 def main():
     st.set_page_config(page_title="學分分析工具", layout="wide")
-    st.title("🦷 學分自動分析計算工具")
-    st.write("上傳「學分整理結果.pdf」，系統將自動為您區分 A類(贗復)、B類(指定單位/規則) 及待判定學分，並精算總和。")
+    st.title("鳥專科醫師換証A/B類學分自動分類計算")
+    st.write("請上傳轉檔後的「學分整理結果.pdf」，系統將自動為您區分 A類(贋復)、B類(符合目前正面表述主辦單位) 及待判定學分，並精算總和。")
 
     uploaded_file = st.file_uploader("選擇 PDF 檔案", type="pdf")
 
