@@ -30,13 +30,29 @@ def process_pdf(uploaded_file):
     if not headers or not all_data:
         return None, "無法從 PDF 中解析出有效的表格格式。"
 
-    df = pd.DataFrame(all_data, columns=headers)
+    # 統一每一列的長度，避免因為 PDF 結尾總計表欄位太少導致後續處理錯位
+    expected_cols = len(headers)
+    normalized_data = []
+    for row in all_data:
+        # 將 None 轉為空字串
+        row = [str(cell) if cell is not None else '' for cell in row]
+        if len(row) < expected_cols:
+            row = row + [''] * (expected_cols - len(row))
+        elif len(row) > expected_cols:
+            row = row[:expected_cols]
+        normalized_data.append(row)
+
+    df = pd.DataFrame(normalized_data, columns=headers)
     df = df.fillna('')
+    
+    # 【關鍵修正】：剃除 PDF 結尾的「依課程類別彙整」總計表
+    # 真實的課程一定會有「課程名稱」，而總計表跑到這個欄位時會是空白的
+    if '課程名稱' in df.columns:
+        df = df[df['課程名稱'].astype(str).str.strip() != '']
     
     return df, None
 
 def categorize_and_calculate(row):
-    # 取出文字，以防錯位，將主辦單位與課程名稱一起進行評估
     org_val = str(row.get('主辦單位', ''))
     course_val = str(row.get('課程名稱', ''))
     reviewer_val = str(row.get('審查單位', ''))
@@ -55,10 +71,7 @@ def categorize_and_calculate(row):
         score = 0.0
 
     # ==== A類判斷邏輯 ====
-    # 大幅放寬條件：只要有這三個詞彙的任何一個，就直接判定為 A 類
     a_keywords = ["贋", "贗", "復牙科"]
-    
-    # 只要合併字串中有出現 A 類關鍵字，就判定為 A 類
     if any(kw in combined_string for kw in a_keywords):
         return pd.Series(['A類', score])
 
@@ -102,7 +115,6 @@ def main():
             if error:
                 st.error(error)
             else:
-                # 確保必要欄位存在 (因為表頭也被清除了空白，所以一定是乾淨的字串)
                 if '主辦單位' not in df.columns or '有效積分' not in df.columns:
                     st.error("解析失敗：找不到「主辦單位」或「有效積分」欄位。")
                     st.write("目前抓取到的欄位為：", df.columns.tolist())
