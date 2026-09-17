@@ -1,491 +1,137 @@
-import io
-import re
-import openpyxl
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-import pandas as pd
-import pdfplumber
 import streamlit as st
+import pdfplumber
+import pandas as pd
 
-# 頁面配置
-st.set_page_config(
-    page_title="鳥專科換證積分分析工具",
-    page_icon="🦷",
-    layout="wide",
-)
+def process_pdf(uploaded_file):
+    all_data = []
+    headers = None
 
-st.title("鳥專科醫師繼續教育積分自動整理器 (學分整理專用版)")
-st.caption("專門支援「學分整理結果」格式：過濾專業課程、辨識 A/B 類學分，並匯出雙頁籤 Excel 報表。")
-
-# 1. 畫面首要條件：要求使用者先上傳檔案
-uploaded_file = st.file_uploader(
-    "請先上傳您的「學分整理結果.pdf」",
-    type=["pdf"],
-    help="請上傳完整積分明細 PDF 檔",
-)
-
-if uploaded_file is None:
-    st.info("👈 請於上方上傳您的 PDF 紀錄檔案以啟動統計分析。")
-    st.stop()
-
-
-def extract_records_from_pdf(file_bytes) -> list[dict]:
-    records = []
-    full_text = ""
-    
-    with pdfplumber.open(file_bytes) as pdf:
+    with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
-            t = page.extract_text()
-            if t: 
-                full_text += t + "\n"
-                
-    # 判斷是否為新版「學分整理結果」
-    is_new_format = "學分整理結果" in full_text or "有效積分合計" in full_text
-    
-    if is_new_format:
-        # 徹底捨棄易碎的表格萃取，全面採用強悍正則掃描 (Regex)
-        # 擷取格式：類別 | 積分 | 審查單位 | 任意文字(包含主辦與課程) | 日期時間
-        pattern = r"(專業課程|專業品質|專業相關法規|專業倫理)\s*(?:\|\s*)?([0-9.]+)\s*\|\s*([^|]+?)\s*\|\s*(.*?)\s*(?:\|\s*)?(\d{4}/\d{1,2}/\d{1,2}(?:\s*\d{1,2}:\d{2})?)"
-        for m in re.finditer(pattern, full_text, re.DOTALL):
-            cat = m.group(1).strip()
-            
-            # 嚴格過濾：只抓取專業課程
-            if "專業課程" not in cat: 
-                continue
-            
-            try: pts = float(m.group(2).strip())
-            except: pts = 0.0
-            
-            review = m.group(3).replace("\n", "").strip()
-            host_course = m.group(4).strip()
-            date_str = m.group(5).strip()
-            
-            # 智慧分離主辦單位與課程名稱 (解決 PDF 排版斷行與跨列的問題)
-            if "|" in host_course:
-                parts = host_course.split("|", 1)
-                host = parts[0].replace("\n", "").strip()
-                course = parts[1].replace("\n", "").strip()
-            else:
-                lines = [line.strip() for line in host_course.split("\n") if line.strip()]
-                
-                # 步驟 A：修復被孤立的後綴詞 (例如「會」、「科學會」被斷到下一行)
-                merged_lines = []
-                for line in lines:
-                    if line in ["會", "科學會", "醫學會", "公會", "學會"] and merged_lines:
-                        merged_lines[-1] += line
-                    else:
-                        merged_lines.append(line)
-                
-                # 步驟 B：分離主辦單位與課程名稱
-                if len(merged_lines) > 1:
-                    if any(merged_lines[-1].endswith(s) for s in ["學會", "公會", "醫院", "聯盟", "大學"]):
-                        host = merged_lines[-1]
-                        course = " ".join(merged_lines[:-1])
-                    else:
-                        host = merged_lines[0]
-                        course = " ".join(merged_lines[1:])
-                elif len(merged_lines) == 1:
-                    host = merged_lines[0]
-                    course = merged_lines[0]
-                else:
-                    host, course = "", ""
-                    
-            records.append({
-                "有效積分": pts,
-                "無效積分": 0.0,
-                "審查單位": review,
-                "主辦單位": host,
-                "課程名稱": course,
-                "raw_lines": [date_str],
-                "is_new_format": True
-            })
-    else:
-        # 舊版格式解析 (保留安全備用機制)
-        start_match = re.search(r"◎\s*參加課程積分", full_text)
-        if start_match:
-            sub_text = full_text[start_match.start() :]
-            end_matches = list(re.finditer(r"\n\s*◎", sub_text))
-            if len(end_matches) > 1:
-                sub_text = sub_text[: end_matches[1].start()]
-
-            lines = [line.strip() for line in sub_text.split("\n") if line.strip()]
-            current_record = None
-
-            for line in lines:
-                if any(k in line for k in ["有效總積分", "課程類別", "審查單位", "衛生福利部", "人員類別"]):
+            table = page.extract_table()
+            if table:
+                table = [row for row in table if not all(cell is None for cell in row)]
+                if not table:
                     continue
 
-                m1 = re.match(r"^專業課程\s+([0-9.]+)\s+([0-9.]+)\s+(\S+)\s+(\S+)\s*(.*)$", line)
-                m2 = re.match(r"^([0-9.]+)\s+([0-9.]+)\s+專業課程\s+(\S+)\s+(\S+)\s*(.*)$", line)
-
-                if m1 or m2:
-                    if current_record: records.append(current_record)
-                    m = m1 if m1 else m2
-                    v_pts, inv_pts, review, host, rest = m.groups()
-                    current_record = {
-                        "有效積分": float(v_pts),
-                        "無效積分": float(inv_pts),
-                        "審查單位": review,
-                        "主辦單位": host,
-                        "課程名稱": rest,
-                        "raw_lines": [],
-                        "is_new_format": False
-                    }
+                if headers is None:
+                    headers = [str(cell).replace('\n', '') if cell else '' for cell in table[0]]
+                    all_data.extend(table[1:])
                 else:
-                    if any(line.startswith(c) for c in ["專業品質", "專業相關法規", "專業倫理"]):
-                        if current_record:
-                            records.append(current_record)
-                            current_record = None
-                        continue
-                    if current_record:
-                        current_record["raw_lines"].append(line)
+                    first_row = [str(cell).replace('\n', '') if cell else '' for cell in table[0]]
+                    if first_row == headers:
+                        all_data.extend(table[1:])
+                    else:
+                        all_data.extend(table)
 
-            if current_record:
-                records.append(current_record)
+    if not headers or not all_data:
+        return None, "無法從 PDF 中解析出有效的表格格式。"
 
-    return [finalize_record(r) for r in records]
-
-
-def finalize_record(record: dict) -> dict:
-    is_new = record.pop("is_new_format", False)
-    raw_tail = " ".join(record.pop("raw_lines"))
-
-    # 提取課程日期與年份
-    dates = re.findall(r"(\d{4}/\d{1,2}/\d{1,2})", raw_tail)
-    course_date = dates[0] if dates else "未知"
-    year = course_date.split("/")[0] if dates else "未知"
-
-    host = record.get("主辦單位", "")
-    review = record.get("審查單位", "")
-    course_name = record.get("課程名稱", "")
-    original_pts = record.get("有效積分", 0.0)
-
-    # 智慧校正：如果表格擷取時將「主辦單位」與「課程名稱」顛倒，自動還原
-    if is_new:
-        if any(course_name.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]) and \
-           not any(host.endswith(s) for s in ["學會", "公會", "醫院", "大學", "中心", "聯盟"]):
-            host, course_name = course_name, host
-
-    # 終極淨化：徹底清除所有 PDF 隱形控制字元 (\u200b 等零寬空白) 與可見空白
-    host_clean = re.sub(r'\s+', '', host).replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
-    review_clean = re.sub(r'\s+', '', review).replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
-    course_clean = re.sub(r'\s+', '', course_name).replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '')
+    df = pd.DataFrame(all_data, columns=headers)
+    df = df.replace(r'\n', '', regex=True)
+    df = df.fillna('')
     
-    course_category = "待判定學分" 
-    final_pts = original_pts
+    return df, None
 
-    # 合併查驗，確保無論關鍵字落在哪個欄位都能被精準捕捉
-    combined_text = f"{host_clean}_{review_clean}_{course_clean}"
+def categorize_and_calculate(row):
+    org_string = str(row.get('主辦單位', '')).replace(' ', '')
+    course_string = str(row.get('課程名稱', '')).replace(' ', '')
     
-    # 【A 類無敵字根】：專門捕捉 贗/贋/膺 異體字與 PDF 漏字狀況
-    a_keywords = ["贗復", "贋復", "膺復", "復牙科"]
-    is_a_class = any(kw in combined_text for kw in a_keywords)
+    try:
+        score = float(row.get('有效積分', 0))
+    except:
+        score = 0.0
 
-    if is_a_class:
-        course_category = "A"
-        # 【強制歸戶正名】：不管原文是贗復、贋復、還是漏字，一律強制正名為統一格式
-        host = "中華民國贋復牙科學會"
-    else:
-        # 【B 類規則】：正面表述驗證
-        is_b_class = False
-        
-        # 規則 4（中華牙醫學會年會）
-        if "中華牙醫學會年會" in combined_text:
-            is_b_class = True
-            final_pts = original_pts / 3.0
-            
-        # 若未命中規則 4，則檢驗其他主辦單位關鍵字
-        if not is_b_class:
-            b_keywords = [
-                "醫學院", "醫學大學", "校友會", "校友總會", "牙友學會",
-                "長庚", "台大", "總醫院", "奇美", "成大", 
-                "童綜合", "中國附醫", "北醫", "馬偕", "高醫", "慈濟",
-                "口腔顎面外科", "齒顎矯正", "家庭牙醫", "兒童牙醫",
-                "牙周病", "牙髓病", "特殊需求", "牙體復形"
-            ]
-            
-            # B 類比對：只查主辦單位與審查單位，避免將課程標題中的醫院誤判
-            host_review = f"{host_clean}_{review_clean}"
-            if any(kw in host_review for kw in b_keywords):
-                is_b_class = True
-                
-        if is_b_class:
-            course_category = "B"
+    # ==== A類判斷邏輯 ====
+    a_keywords = ["中華民國贗復牙科學會", "中華民國復牙科學會", "中華民國贗復牙會", "復牙科"]
+    if any(kw in org_string for kw in a_keywords):
+        return pd.Series(['A類', score])
 
-    # 清洗課程名稱，保留單一空白以利閱讀
-    if not is_new:
-        cleaned_tail = re.sub(r"\d{4}/\d{1,2}/\d{1,2}(?:\s+\d{1,2}:\d{2})?", "", raw_tail)
-        cleaned_tail = re.sub(r"\b(D1|D2|AG|A|B|C|F|G|H)\b", "", cleaned_tail)
-        cleaned_tail = re.sub(r"[AB]\s*類", "", cleaned_tail)
-        full_title = re.sub(r"\s+", " ", (course_name + " " + cleaned_tail).strip())
-    else:
-        full_title = re.sub(r"\s+", " ", course_name.strip())
-        
-    if not full_title and host:
-        full_title = "專業課程"
-
-    return {
-        "主辦單位": host.strip(),
-        "課程名稱": full_title,
-        "類別": course_category,
-        "有效積分": final_pts,
-        "課程日期": course_date,
-        "年度": year,
-    }
-
-
-def build_excel(records: list[dict], stream: io.BytesIO):
-    org_dict = {}
-    for r in records:
-        org_dict.setdefault(r["主辦單位"], []).append(r)
-    sorted_orgs = sorted(
-        org_dict.items(),
-        key=lambda x: sum(i["有效積分"] for i in x[1]),
-        reverse=True,
-    )
-
-    wb = openpyxl.Workbook()
-    thin_border = Border(
-        left=Side(style="thin", color="D3D3D3"),
-        right=Side(style="thin", color="D3D3D3"),
-        top=Side(style="thin", color="D3D3D3"),
-        bottom=Side(style="thin", color="D3D3D3"),
-    )
-    double_bottom = Border(
-        left=Side(style="thin", color="D3D3D3"),
-        right=Side(style="thin", color="D3D3D3"),
-        top=Side(style="thin", color="D3D3D3"),
-        bottom=Side(style="double", color="1B365D"),
-    )
-
-    # 頁籤 1: 主辦單位統計總表
-    ws1 = wb.active
-    ws1.title = "主辦單位統計總表"
-    ws1.views.sheetView[0].showGridLines = True
-    ws1["A1"] = "牙醫師繼續教育積分 — 專業課程統計總表 (含待判定學分)"
-    ws1["A1"].font = Font(name="微軟正黑體", size=14, bold=True, color="1B365D")
-    ws1.append([])
-
-    headers_ws1 = [
-        "主辦單位名稱",
-        "修習堂數",
-        "A類積分",
-        "B類積分",
-        "待判定積分",
-        "有效積分加總",
-        "積分佔比 (%)",
-        "課程年份區間",
+    # ==== B類判斷邏輯 ====
+    b_keywords = [
+        "醫學院", "醫學大學",
+        "校友會", "校友總會", "牙友學會",
+        "長庚醫院", "台大醫院", "總醫院", "奇美醫院", "成大醫院",
+        "童綜合醫院", "中國附醫", "北醫附醫", "馬偕醫院", "高雄長庚",
+        "高醫附醫", "花蓮慈濟",
+        "中華民國口腔顎面外科學會", "中華民國齒顎矯正學會", "中華民國家庭牙醫學會",
+        "中華民國兒童牙醫學會", "台灣牙周病醫學會", "中華民國牙髓病學會",
+        "台灣特殊需求者口腔醫學會", "牙體復形科", "中華民國牙體復形學會"
     ]
-    ws1.append(headers_ws1)
+    
+    is_b_class = any(kw in org_string for kw in b_keywords)
+    score_multiplier = 1.0
 
-    for col in range(1, 9):
-        c = ws1.cell(row=3, column=col)
-        c.font = Font(name="微軟正黑體", size=10, bold=True, color="FFFFFF")
-        c.fill = PatternFill("solid", fgColor="1B365D")
-        c.alignment = Alignment(horizontal="center", vertical="center")
+    # 規則 4：中華牙醫學會年會
+    if "中華牙醫學會年會" in org_string or "中華牙醫學會年會" in course_string:
+        is_b_class = True
+        score_multiplier = 1.0 / 3.0
 
-    row = 4
-    for org, items in sorted_orgs:
-        pts = sum(i["有效積分"] for i in items)
-        a_pts = sum(i["有效積分"] for i in items if i["類別"] == "A")
-        b_pts = sum(i["有效積分"] for i in items if i["類別"] == "B")
-        p_pts = sum(i["有效積分"] for i in items if i["類別"] == "待判定學分")
-        years = sorted(list(set(i["年度"] for i in items)))
-        yr_str = f"{years[0]} ~ {years[-1]}" if len(years) > 1 else years[0]
+    if is_b_class:
+        return pd.Series(['B類', score * score_multiplier])
 
-        ws1.cell(row=row, column=1, value=org).font = Font(name="微軟正黑體", size=10, bold=True)
-        ws1.cell(row=row, column=2, value=len(items)).alignment = Alignment(horizontal="center")
-        ws1.cell(row=row, column=3, value=round(a_pts, 2)).alignment = Alignment(horizontal="right")
-        ws1.cell(row=row, column=4, value=round(b_pts, 2)).alignment = Alignment(horizontal="right")
-        ws1.cell(row=row, column=5, value=round(p_pts, 2)).alignment = Alignment(horizontal="right")
-        ws1.cell(row=row, column=6, value=round(pts, 2)).alignment = Alignment(horizontal="right")
-        ws1.cell(row=row, column=7, value=f"=F{row}/F{len(sorted_orgs)+4}")
-        ws1.cell(row=row, column=8, value=yr_str).alignment = Alignment(horizontal="center")
+    # ==== 待判定邏輯 ====
+    return pd.Series(['待判定', score])
 
-        for c_idx in [3, 4, 5, 6]:
-            ws1.cell(row=row, column=c_idx).number_format = "#,##0.00"
-        ws1.cell(row=row, column=7).number_format = "0.0%"
-        for c in range(1, 9):
-            ws1.cell(row=row, column=c).border = thin_border
-        row += 1
+def main():
+    st.set_page_config(page_title="學分分析工具", layout="wide")
+    st.title("🦷 學分自動分析計算工具")
+    st.write("上傳「學分整理結果.pdf」，系統將自動為您區分 A類(贗復)、B類(指定單位/規則) 及待判定學分，並精算總和。")
 
-    # 總計行
-    ws1.cell(row=row, column=1, value="總計").font = Font(name="微軟正黑體", size=10, bold=True, color="1B365D")
-    ws1.cell(row=row, column=2, value=f"=SUM(B4:B{row-1})").alignment = Alignment(horizontal="center")
-    ws1.cell(row=row, column=3, value=f"=SUM(C4:C{row-1})").alignment = Alignment(horizontal="right")
-    ws1.cell(row=row, column=4, value=f"=SUM(D4:D{row-1})").alignment = Alignment(horizontal="right")
-    ws1.cell(row=row, column=5, value=f"=SUM(E4:E{row-1})").alignment = Alignment(horizontal="right")
-    ws1.cell(row=row, column=6, value=f"=SUM(F4:F{row-1})").alignment = Alignment(horizontal="right")
-    ws1.cell(row=row, column=7, value=1).alignment = Alignment(horizontal="right")
+    uploaded_file = st.file_uploader("選擇 PDF 檔案", type="pdf")
 
-    for c_idx in [3, 4, 5, 6]:
-        ws1.cell(row=row, column=c_idx).number_format = "#,##0.00"
-    ws1.cell(row=row, column=7).number_format = "0.0%"
-    for c in range(1, 9):
-        ws1.cell(row=row, column=c).border = double_bottom
+    if uploaded_file is not None:
+        with st.spinner("正在解析 PDF 並套用分類規則..."):
+            df, error = process_pdf(uploaded_file)
+            
+            if error:
+                st.error(error)
+            else:
+                if '主辦單位' not in df.columns or '有效積分' not in df.columns:
+                    st.error("解析失敗：找不到「主辦單位」或「有效積分」欄位。")
+                    return
 
-    ws1.column_dimensions["A"].width = 28
-    ws1.column_dimensions["B"].width = 12
-    ws1.column_dimensions["C"].width = 14
-    ws1.column_dimensions["D"].width = 14
-    ws1.column_dimensions["E"].width = 14
-    ws1.column_dimensions["F"].width = 16
-    ws1.column_dimensions["G"].width = 14
-    ws1.column_dimensions["H"].width = 18
+                df[['分類', '核算後積分']] = df.apply(categorize_and_calculate, axis=1)
 
-    # 頁籤 2: 課程明細
-    ws2 = wb.create_sheet(title="專業課程明細(依主辦單位分類)")
-    ws2.views.sheetView[0].showGridLines = True
-    curr_row = 1
+                df_a = df[df['分類'] == 'A類']
+                df_b = df[df['分類'] == 'B類']
+                df_pending = df[df['分類'] == '待判定']
 
-    for idx, (org, items) in enumerate(sorted_orgs, 1):
-        org_pts = sum(i["有效積分"] for i in items)
-        ws2.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=6)
-        banner = ws2.cell(row=curr_row, column=1, value=f"【大類 {idx}】 {org} （共 {len(items)} 堂，小計：{org_pts:.2f} 分）")
-        banner.font = Font(name="微軟正黑體", size=11, bold=True, color="FFFFFF")
-        fill_b = PatternFill("solid", fgColor="1B365D") if idx % 2 == 1 else PatternFill("solid", fgColor="006666")
-        for c in range(1, 7):
-            ws2.cell(row=curr_row, column=c).fill = fill_b
-        curr_row += 1
+                total_a = df_a['核算後積分'].sum()
+                total_b = df_b['核算後積分'].sum()
+                total_pending = df_pending['核算後積分'].sum()
 
-        detail_headers = ["項次", "課程日期", "課程名稱 / 主題", "類別", "主辦單位", "有效積分"]
-        for c_idx, h in enumerate(detail_headers, 1):
-            cell = ws2.cell(row=curr_row, column=c_idx, value=h)
-            cell.fill = PatternFill("solid", fgColor="2C4D75")
-            cell.font = Font(name="微軟正黑體", size=10, bold=True, color="FFFFFF")
-            cell.alignment = Alignment(horizontal="center")
-        curr_row += 1
+                st.success("檔案解析與分類成功！")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric(label="✅ A類學分 (贗復) 總計", value=f"{total_a:.2f} 分")
+                with col2:
+                    st.metric(label="✅ B類學分 (其他認可) 總計", value=f"{total_b:.2f} 分")
+                with col3:
+                    st.metric(label="⚠️ 待判定學分 總計", value=f"{total_pending:.2f} 分")
+                
+                st.divider()
 
-        start_r = curr_row
-        for item_idx, item in enumerate(items, 1):
-            ws2.cell(row=curr_row, column=1, value=item_idx).alignment = Alignment(horizontal="center")
-            ws2.cell(row=curr_row, column=2, value=item["課程日期"]).alignment = Alignment(horizontal="center")
-            ws2.cell(row=curr_row, column=3, value=item["課程名稱"]).alignment = Alignment(wrap_text=True)
-            ws2.cell(row=curr_row, column=4, value=item["類別"]).alignment = Alignment(horizontal="center")
-            ws2.cell(row=curr_row, column=5, value=org)
-            ws2.cell(row=curr_row, column=6, value=item["有效積分"]).number_format = "#,##0.00"
-            for c in range(1, 7):
-                ws2.cell(row=curr_row, column=c).border = thin_border
-            curr_row += 1
+                tab1, tab2, tab3, tab4 = st.tabs(["A類清單", "B類清單", "待判定清單", "查看原始所有資料"])
+                
+                with tab1:
+                    st.subheader(f"A類 課程清單 (共 {len(df_a)} 筆)")
+                    st.dataframe(df_a, use_container_width=True, hide_index=True)
+                
+                with tab2:
+                    st.subheader(f"B類 課程清單 (共 {len(df_b)} 筆)")
+                    st.info("💡 提示：若課程包含「中華牙醫學會年會」，核算後積分已自動乘以 1/3。")
+                    st.dataframe(df_b, use_container_width=True, hide_index=True)
+                
+                with tab3:
+                    st.subheader(f"待判定 課程清單 (共 {len(df_pending)} 筆)")
+                    st.warning("這些項目不符合 A 類與 B 類的正面表述字詞，請人工檢查是否為有效學分。")
+                    st.dataframe(df_pending, use_container_width=True, hide_index=True)
+                    
+                with tab4:
+                    st.subheader(f"原始所有資料 (共 {len(df)} 筆)")
+                    st.dataframe(df, use_container_width=True, hide_index=True)
 
-        # 小計行
-        ws2.merge_cells(start_row=curr_row, start_column=1, end_row=curr_row, end_column=5)
-        ws2.cell(row=curr_row, column=1, value=f"{org} — 小計").alignment = Alignment(horizontal="right")
-        sub_sum = ws2.cell(row=curr_row, column=6, value=f"=SUM(F{start_r}:F{curr_row-1})")
-        sub_sum.number_format = "#,##0.00"
-        sub_sum.font = Font(name="微軟正黑體", bold=True)
-        for c in range(1, 7):
-            ws2.cell(row=curr_row, column=c).border = thin_border
-        curr_row += 2
-
-    ws2.column_dimensions["A"].width = 8
-    ws2.column_dimensions["B"].width = 14
-    ws2.column_dimensions["C"].width = 56
-    ws2.column_dimensions["D"].width = 12
-    ws2.column_dimensions["E"].width = 24
-    ws2.column_dimensions["F"].width = 14
-
-    wb.save(stream)
-
-
-# 2. 資料解析與指標呈現
-with st.spinner("正在解析 PDF 並計算 A/B 類積分..."):
-    records = extract_records_from_pdf(uploaded_file)
-
-if not records:
-    st.error("未能從上傳的 PDF 中解析出任何「專業課程」資料，請確認檔案格式是否正確。")
-    st.stop()
-
-df = pd.DataFrame(records)
-
-# 聚合統計
-total_pts = df["有效積分"].sum()
-a_pts = df[df["類別"] == "A"]["有效積分"].sum()
-b_pts = df[df["類別"] == "B"]["有效積分"].sum()
-p_pts = df[df["類別"] == "待判定學分"]["有效積分"].sum()
-total_courses = len(df)
-total_hosts = df["主辦單位"].nunique()
-
-# 3. 五格自適應指標卡片 (Metric Cards)
-st.subheader("📊 積分採認總覽")
-c1, c2, c3, c4, c5 = st.columns(5)
-with c1:
-    st.metric(
-        label="專業課程總積分",
-        value=f"{total_pts:.2f} 分",
-        help="所有專業課程採認有效積分加總",
-    )
-with c2:
-    a_pct = (a_pts / total_pts * 100) if total_pts > 0 else 0
-    st.metric(
-        label="A 類積分",
-        value=f"{a_pts:.2f} 分",
-        delta=f"佔比 {a_pct:.1f}%",
-        help="嚴格符合贗復學會",
-    )
-with c3:
-    b_pct = (b_pts / total_pts * 100) if total_pts > 0 else 0
-    st.metric(
-        label="B 類積分",
-        value=f"{b_pts:.2f} 分",
-        delta=f"佔比 {b_pct:.1f}%",
-        delta_color="off",
-        help="正面表列之特定主辦機構",
-    )
-with c4:
-    p_pct = (p_pts / total_pts * 100) if total_pts > 0 else 0
-    st.metric(
-        label="待判定學分",
-        value=f"{p_pts:.2f} 分",
-        delta=f"佔比 {p_pct:.1f}%",
-        delta_color="inverse",
-        help="未符合A或B類條件，需人工檢閱",
-    )
-with c5:
-    st.metric(
-        label="修習堂數 / 機構",
-        value=f"{total_courses} 堂",
-        delta=f"涵蓋 {total_hosts} 個主辦單位",
-        delta_color="off",
-    )
-
-st.divider()
-
-# 4. 主辦單位分組聚合表與詳細清單
-tab1, tab2 = st.tabs(["🏛️ 主辦單位聚合統計", "📄 完整課程明細"])
-
-with tab1:
-    summary_df = (
-        df.groupby("主辦單位")
-        .agg(
-            修習堂數=("課程名稱", "count"),
-            A類積分=("有效積分", lambda s: s[df.loc[s.index, "類別"] == "A"].sum()),
-            B類積分=("有效積分", lambda s: s[df.loc[s.index, "類別"] == "B"].sum()),
-            待判定積分=("有效積分", lambda s: s[df.loc[s.index, "類別"] == "待判定學分"].sum()),
-            有效積分總計=("有效積分", "sum"),
-        )
-        .sort_values(by="有效積分總計", ascending=False)
-        .reset_index()
-    )
-    summary_df["積分佔比"] = (
-        summary_df["有效積分總計"] / total_pts
-    ).map(lambda x: f"{x:.1%}")
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-with tab2:
-    st.dataframe(
-        df[["課程日期", "主辦單位", "課程名稱", "類別", "有效積分"]],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-# 5. 匯出 Excel 報表下載按鈕
-excel_stream = io.BytesIO()
-build_excel(records, excel_stream)
-excel_stream.seek(0)
-
-st.download_button(
-    label="📥 下載完整統計 Excel 報表 (.xlsx)",
-    data=excel_stream,
-    file_name="牙醫師繼續教育積分_學分整理專用版.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+if __name__ == "__main__":
+    main()
