@@ -55,8 +55,8 @@ def categorize_and_calculate(row):
         score = 0.0
 
     # ==== A類判斷邏輯 ====
-    # 加入了異體字「贋」以防萬一
-    a_keywords = ["中華民國贗復牙科學會", "中華民國贋復牙科學會", "中華民國復牙科學會", "中華民國贗復牙會", "復牙科"]
+    # 大幅放寬條件：只要有這三個詞彙的任何一個，就直接判定為 A 類
+    a_keywords = ["贋", "贗", "復牙科"]
     
     # 只要合併字串中有出現 A 類關鍵字，就判定為 A 類
     if any(kw in combined_string for kw in a_keywords):
