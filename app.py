@@ -13,12 +13,12 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("鳥專科醫師繼續教育積分自動整理器 (A/B 類分析版)")
-st.caption("支援多種衛福部繼續教育積分 PDF 格式：自動過濾專業課程、辨識 A/B 類學分，並匯出雙頁籤 Excel 報表。")
+st.title("鳥專科醫師繼續教育積分自動整理器 (學分整理結果版)")
+st.caption("專門支援「學分整理結果」格式：過濾專業課程、辨識 A/B 類學分，並匯出雙頁籤 Excel 報表。")
 
 # 1. 畫面首要條件：要求使用者先上傳檔案
 uploaded_file = st.file_uploader(
-    "請先上傳您的「繼續教育積分紀錄.pdf」或「學分整理結果.pdf」",
+    "請先上傳您的「學分整理結果.pdf」",
     type=["pdf"],
     help="請上傳完整積分明細 PDF 檔",
 )
@@ -39,7 +39,7 @@ def extract_records_from_pdf(file_bytes) -> list[dict]:
             if t:
                 full_text += t + "\n"
                 
-            # 引擎 1：嘗試以結構化表格方式擷取 (專解新版「學分整理結果」格式)
+            # 引擎 1：嘗試以結構化表格方式擷取
             tables = page.extract_tables()
             for table in tables:
                 if not table: continue
@@ -72,18 +72,15 @@ def extract_records_from_pdf(file_bytes) -> list[dict]:
                             "審查單位": review,
                             "主辦單位": host,
                             "課程名稱": course_name,
-                            "raw_lines": [date_str],
-                            "is_new_format": True
+                            "raw_lines": [date_str]
                         })
     
     # 若表格引擎成功擷取資料，直接進入後處理
     if records:
         return [finalize_record(r) for r in records]
 
-    # 引擎 2：新版格式的純文字正則備用解析 (當 PDF 缺乏實體表格線時觸發)
-    is_new_format_text = "學分整理結果" in full_text or "有效積分合計" in full_text
-    if is_new_format_text:
-        # 利用非貪婪匹配捕捉 | 符號間的各項欄位，並強制鎖定「專業課程」開頭
+    # 引擎 2：純文字正則備用解析 (當 PDF 缺乏實體表格線時觸發)
+    if "學分整理結果" in full_text or "有效積分合計" in full_text:
         pattern = r"專業課程\s*(?:\|\s*)?([0-9.]+)\s*\|\s*([^|]+?)\s*\|\s*(.*?)\s*(?:\|\s*)?(\d{4}/\d{2}/\d{2}\s*(?:\d{2}:\d{2})?)"
         for m in re.finditer(pattern, full_text, re.DOTALL):
             pts_str, review, host_course, date_str = m.groups()
@@ -111,65 +108,16 @@ def extract_records_from_pdf(file_bytes) -> list[dict]:
                 "審查單位": review.replace("\n", "").strip(),
                 "主辦單位": host,
                 "課程名稱": course,
-                "raw_lines": [date_str],
-                "is_new_format": True
+                "raw_lines": [date_str]
             })
             
         if records:
             return [finalize_record(r) for r in records]
 
-    # 引擎 3：相容舊版衛福部「◎ 參加課程積分」格式
-    start_match = re.search(r"◎\s*參加課程積分", full_text)
-    if not start_match:
-        return []
-    
-    sub_text = full_text[start_match.start() :]
-    end_matches = list(re.finditer(r"\n\s*◎", sub_text))
-    if len(end_matches) > 1:
-        sub_text = sub_text[: end_matches[1].start()]
-
-    lines = [line.strip() for line in sub_text.split("\n") if line.strip()]
-    current_record = None
-
-    for line in lines:
-        if any(k in line for k in ["有效總積分", "課程類別", "審查單位", "衛生福利部", "人員類別"]):
-            continue
-
-        m1 = re.match(r"^專業課程\s+([0-9.]+)\s+([0-9.]+)\s+(\S+)\s+(\S+)\s*(.*)$", line)
-        m2 = re.match(r"^([0-9.]+)\s+([0-9.]+)\s+專業課程\s+(\S+)\s+(\S+)\s*(.*)$", line)
-
-        if m1 or m2:
-            if current_record:
-                records.append(current_record)
-            m = m1 if m1 else m2
-            v_pts, inv_pts, review, host, rest = m.groups()
-            current_record = {
-                "有效積分": float(v_pts),
-                "無效積分": float(inv_pts),
-                "審查單位": review,
-                "主辦單位": host,
-                "課程名稱": rest,
-                "raw_lines": [],
-                "is_new_format": False
-            }
-        else:
-            # 舊版格式排除非專業課程
-            if any(line.startswith(c) for c in ["專業品質", "專業相關法規", "專業倫理"]):
-                if current_record:
-                    records.append(current_record)
-                    current_record = None
-                continue
-            if current_record:
-                current_record["raw_lines"].append(line)
-
-    if current_record:
-        records.append(current_record)
-
-    return [finalize_record(r) for r in records]
+    return []
 
 
 def finalize_record(record: dict) -> dict:
-    is_new = record.pop("is_new_format", False)
     raw_tail = " ".join(record.pop("raw_lines"))
 
     # 提取課程日期與年份
@@ -182,7 +130,7 @@ def finalize_record(record: dict) -> dict:
     course_name = record["課程名稱"]
     original_pts = record["有效積分"]
     
-    # 移除空白，避免因 PDF 擷取造成的字元間距問題
+    # 移除空白，避免因 PDF 擷取造成的字元間距與漏字結合問題
     host_clean = host.replace(" ", "")
     review_clean = review.replace(" ", "")
     course_clean = course_name.replace(" ", "")
@@ -190,8 +138,12 @@ def finalize_record(record: dict) -> dict:
     course_category = "待判定學分" 
     final_pts = original_pts
 
-    # 【A 類規則】：因應 PDF 截斷，嚴格要求包含指定字串 (若不包含以下三者之一，絕對無法歸為 A 類)
-    a_keywords = ["中華民國贗復", "中華民國贋復", "贋復牙科"]
+    # 【A 類規則】：因應 PDF 擷取時常常將「贗/贋」字轉成空白而被刪除（變成中華民國復牙科學會）
+    # 故放寬條件，將遺失字元後的特徵字串也一併納入白名單
+    a_keywords = [
+        "中華民國贗復", "中華民國贋復", "贋復牙科", "贗復牙科",
+        "中華民國復牙", "復牙科學會"
+    ]
     is_a_class = any(kw in host_clean or kw in review_clean for kw in a_keywords)
 
     if is_a_class:
@@ -230,14 +182,8 @@ def finalize_record(record: dict) -> dict:
         if is_b_class:
             course_category = "B"
 
-    # 清洗多餘代碼並重建課程名稱 (針對新舊格式做不同處理)
-    if not is_new:
-        cleaned_tail = re.sub(r"\d{4}/\d{1,2}/\d{1,2}(?:\s+\d{1,2}:\d{2})?", "", raw_tail)
-        cleaned_tail = re.sub(r"\b(D1|D2|AG|A|B|C|F|G|H)\b", "", cleaned_tail)
-        cleaned_tail = re.sub(r"[AB]\s*類", "", cleaned_tail)
-        full_title = re.sub(r"\s+", " ", (course_name + " " + cleaned_tail).strip())
-    else:
-        full_title = re.sub(r"\s+", " ", course_name.strip())
+    # 清洗多餘代碼並重建課程名稱
+    full_title = re.sub(r"\s+", " ", course_name.strip())
 
     return {
         "主辦單位": host,
@@ -502,6 +448,6 @@ excel_stream.seek(0)
 st.download_button(
     label="📥 下載完整統計 Excel 報表 (.xlsx)",
     data=excel_stream,
-    file_name="牙醫師繼續教育積分_AB類與待判定統計表.xlsx",
+    file_name="牙醫師繼續教育積分_學分整理專用版.xlsx",
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 )
