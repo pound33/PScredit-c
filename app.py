@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("🦷 牙醫師繼續教育積分自動整理器 (A/B 類分析版)")
+st.title("鳥專科醫師繼續教育積分自動整理器 (A/B 類分析版)")
 st.caption("支援衛福部繼續教育積分清單 PDF：自動辨識 A/B 類學分、統計主辦單位分佈並匯出雙頁籤 Excel 報表。")
 
 # 1. 畫面首要條件：要求使用者先上傳檔案
@@ -102,11 +102,52 @@ def finalize_record(record: dict) -> dict:
     course_date = dates[0] if dates else "未知"
     year = course_date.split("/")[0] if dates else "未知"
 
-    # A/B 類積分採認判斷
-    cat_match = re.search(r"\b([AB])\b", raw_tail) or re.search(
-        r"([AB])\s*類", raw_tail
-    )
-    course_category = cat_match.group(1).upper() if cat_match else "A"
+    host = record["主辦單位"]
+    course_name = record["課程名稱"]
+    original_pts = record["有效積分"]
+    
+    # ---------------------------------------------------------
+    # A/B 類積分採認判定與學分調整
+    # ---------------------------------------------------------
+    course_category = None
+    final_pts = original_pts
+
+    # A 類規則：主辦單位為「中華民國贗復牙科學會」或「贋復」
+    if "中華民國贗復牙科學會" in host or "中華民國贋復牙科學會" in host:
+        course_category = "A"
+    else:
+        # B 類規則 4：中華牙醫學會年會 (包含於名稱或主辦單位)，學分自動乘 1/3
+        if "中華牙醫學會年會" in course_name or "中華牙醫學會年會" in host:
+            course_category = "B"
+            final_pts = original_pts / 3.0
+        else:
+            # 建立 B 類關鍵字清單 (規則 1, 2, 3, 5)
+            b_keywords = [
+                # 規則 1
+                "醫學院", "醫學大學",
+                # 規則 2
+                "校友會", "校友總會", "牙友學會",
+                # 規則 3
+                "長庚醫院", "台大醫院", "總醫院", "奇美醫院", "成大醫院",
+                "童綜合醫院", "中國附醫", "北醫附醫", "馬偕醫院", "高雄長庚",
+                "高醫附醫", "花蓮慈濟",
+                # 規則 5
+                "中華民國口腔顎面外科學會", "中華民國齒顎矯正學會",
+                "中華民國家庭牙醫學會", "中華民國兒童牙醫學會",
+                "台灣牙周病醫學會", "中華民國牙髓病學會",
+                "台灣特殊需求者口腔醫學會牙體復形科", "中華民國牙體復形學會"
+            ]
+            
+            # 若主辦單位包含上述關鍵字，判定為 B 類
+            if any(kw in host for kw in b_keywords):
+                course_category = "B"
+
+    # 備用機制：若上述規則均未命中，沿用原本自字串抓取 A/B 類的邏輯
+    if not course_category:
+        cat_match = re.search(r"\b([AB])\b", raw_tail) or re.search(
+            r"([AB])\s*類", raw_tail
+        )
+        course_category = cat_match.group(1).upper() if cat_match else "A"
 
     # 清洗多餘代碼並重建課程名稱
     cleaned_tail = re.sub(
@@ -115,14 +156,14 @@ def finalize_record(record: dict) -> dict:
     cleaned_tail = re.sub(r"\b(D1|D2|AG|A|B|C|F|G|H)\b", "", cleaned_tail)
     cleaned_tail = re.sub(r"[AB]\s*類", "", cleaned_tail)
     full_title = re.sub(
-        r"\s+", " ", (record["課程名稱"] + " " + cleaned_tail).strip()
+        r"\s+", " ", (course_name + " " + cleaned_tail).strip()
     )
 
     return {
-        "主辦單位": record["主辦單位"],
+        "主辦單位": host,
         "課程名稱": full_title,
         "類別": course_category,
-        "有效積分": record["有效積分"],
+        "有效積分": final_pts,
         "課程日期": course_date,
         "年度": year,
     }
