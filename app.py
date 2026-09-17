@@ -13,7 +13,7 @@ st.set_page_config(
     layout="wide",
 )
 
-st.title("鳥專科醫師繼續教育積分自動整理器 (A/B 類現行認定版)")
+st.title("鳥專科醫師繼續教育積分自動整理器 (A/B 類分析版)")
 st.caption("支援衛福部繼續教育積分清單 PDF：自動辨識 A/B 類學分、統計主辦單位分佈並匯出雙頁籤 Excel 報表。")
 
 # 1. 畫面首要條件：要求使用者先上傳檔案
@@ -102,11 +102,67 @@ def finalize_record(record: dict) -> dict:
     course_date = dates[0] if dates else "未知"
     year = course_date.split("/")[0] if dates else "未知"
 
-    # A/B 類積分採認判斷
-    cat_match = re.search(r"\b([AB])\b", raw_tail) or re.search(
-        r"([AB])\s*類", raw_tail
+    host = record["主辦單位"]
+    review = record["審查單位"]
+    course_name = record["課程名稱"]
+    original_pts = record["有效積分"]
+    
+    # 【關鍵修正】：移除空白以防止 PDF 擷取時造成的斷行、字元間距或欄位偏移問題
+    host_clean = host.replace(" ", "")
+    review_clean = review.replace(" ", "")
+    course_name_clean = course_name.replace(" ", "")
+    
+    # ---------------------------------------------------------
+    # A/B 類積分採認判定與學分調整
+    # ---------------------------------------------------------
+    course_category = None
+    final_pts = original_pts
+
+    # 【嚴格鎖定 A 類】：主辦單位（或因 PDF 欄位偏移而在審查單位）必須為贗復牙科學會
+    # 縮小關鍵字範圍至 "贗復牙科"，避開「社團法人」或「中華民國」因簡寫或缺字導致的誤判
+    is_a_class_host = (
+        "贗復牙科" in host_clean or "贋復牙科" in host_clean or
+        "贗復牙科" in review_clean or "贋復牙科" in review_clean
     )
-    course_category = cat_match.group(1).upper() if cat_match else "A"
+
+    if is_a_class_host:
+        course_category = "A"
+    else:
+        # 只要不是上述學會，【絕對不能是 A 類】！進入 B 類檢查機制
+        
+        # B 類規則 4：中華牙醫學會年會，學分自動乘 1/3
+        if "中華牙醫學會年會" in course_name_clean or "中華牙醫學會年會" in host_clean:
+            course_category = "B"
+            final_pts = original_pts / 3.0
+        else:
+            # B 類規則 1, 2, 3, 5 的關鍵字名單 (濃縮字眼以大幅提升容錯率)
+            b_keywords = [
+                "醫學院", "醫學大學", 
+                "校友會", "校友總會", "牙友學會",
+                "長庚", "台大", "總醫院", "奇美", "成大",
+                "童綜合", "中國附醫", "北醫", "馬偕",
+                "高醫", "慈濟", 
+                "口腔顎面外科", "齒顎矯正",
+                "家庭牙醫", "兒童牙醫",
+                "牙周病", "牙髓病",
+                "特殊需求", "牙體復形"
+            ]
+            
+            if any(kw in host_clean for kw in b_keywords):
+                course_category = "B"
+
+        # 備用機制：如果不符合 B 類白名單，從原始資料中抓取 A/B 分類
+        if not course_category:
+            cat_match = re.search(r"\b([AB])\b", raw_tail) or re.search(
+                r"([AB])\s*類", raw_tail
+            )
+            extracted_cat = cat_match.group(1).upper() if cat_match else "B"
+            
+            # 【防堵漏洞】：非贗復學會的主辦單位，即使衛福部 PDF 上寫 A 類，也強制降轉為 B 類
+            if extracted_cat == "A":
+                course_category = "B"
+            else:
+                course_category = extracted_cat
 
     # 清洗多餘代碼並重建課程名稱
     cleaned_tail = re.sub(
@@ -115,14 +171,14 @@ def finalize_record(record: dict) -> dict:
     cleaned_tail = re.sub(r"\b(D1|D2|AG|A|B|C|F|G|H)\b", "", cleaned_tail)
     cleaned_tail = re.sub(r"[AB]\s*類", "", cleaned_tail)
     full_title = re.sub(
-        r"\s+", " ", (record["課程名稱"] + " " + cleaned_tail).strip()
+        r"\s+", " ", (course_name + " " + cleaned_tail).strip()
     )
 
     return {
-        "主辦單位": record["主辦單位"],
+        "主辦單位": host,
         "課程名稱": full_title,
         "類別": course_category,
-        "有效積分": record["有效積分"],
+        "有效積分": final_pts,
         "課程日期": course_date,
         "年度": year,
     }
